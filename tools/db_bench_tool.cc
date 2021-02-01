@@ -3362,6 +3362,9 @@ class Benchmark {
     printf("Initializing RocksDB Options from command-line flags\n");
     Options& options = *opts;
 
+    options.db_paths={{"/home/wp/400G/wp/db1",10l*1024*1024*1024},
+    {"/home/wp/400G/wp/db2",100l*1024*1024*1024}};
+
     assert(db_.db == nullptr);
 
     options.max_open_files = FLAGS_open_files;
