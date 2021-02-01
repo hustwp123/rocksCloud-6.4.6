@@ -209,6 +209,10 @@ struct BlockBasedTableOptions {
   // Default: true
   bool use_delta_encoding = true;
 
+  //wp
+  bool use_pdt = false;
+  //bool use_pdt = true;
+
   // If non-nullptr, use the specified filter policy to reduce disk reads.
   // Many applications will benefit from passing the result of
   // NewBloomFilterPolicy() here.

@@ -8,7 +8,6 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "rocksdb/filter_policy.h"
-
 #include "rocksdb/slice.h"
 #include "table/block_based/block_based_filter_block.h"
 #include "table/block_based/full_filter_block.h"
@@ -25,37 +24,37 @@ FullFilterBitsBuilder::FullFilterBitsBuilder(const size_t bits_per_key,
                                              const size_t num_probes)
     : bits_per_key_(bits_per_key), num_probes_(num_probes) {
   assert(bits_per_key_);
+}
+
+FullFilterBitsBuilder::~FullFilterBitsBuilder() {}
+
+void FullFilterBitsBuilder::AddKey(const Slice& key) {
+  uint32_t hash = BloomHash(key);
+  if (hash_entries_.size() == 0 || hash != hash_entries_.back()) {
+    hash_entries_.push_back(hash);
   }
+}
 
-  FullFilterBitsBuilder::~FullFilterBitsBuilder() {}
+Slice FullFilterBitsBuilder::Finish(std::unique_ptr<const char[]>* buf) {
+  uint32_t total_bits, num_lines;
+  char* data = ReserveSpace(static_cast<int>(hash_entries_.size()), &total_bits,
+                            &num_lines);
+  assert(data);
 
-  void FullFilterBitsBuilder::AddKey(const Slice& key) {
-    uint32_t hash = BloomHash(key);
-    if (hash_entries_.size() == 0 || hash != hash_entries_.back()) {
-      hash_entries_.push_back(hash);
+  if (total_bits != 0 && num_lines != 0) {
+    for (auto h : hash_entries_) {
+      AddHash(h, data, num_lines, total_bits);
     }
   }
+  data[total_bits / 8] = static_cast<char>(num_probes_);
+  EncodeFixed32(data + total_bits / 8 + 1, static_cast<uint32_t>(num_lines));
 
-  Slice FullFilterBitsBuilder::Finish(std::unique_ptr<const char[]>* buf) {
-    uint32_t total_bits, num_lines;
-    char* data = ReserveSpace(static_cast<int>(hash_entries_.size()),
-                              &total_bits, &num_lines);
-    assert(data);
+  const char* const_data = data;
+  buf->reset(const_data);
+  hash_entries_.clear();
 
-    if (total_bits != 0 && num_lines != 0) {
-      for (auto h : hash_entries_) {
-        AddHash(h, data, num_lines, total_bits);
-      }
-    }
-    data[total_bits/8] = static_cast<char>(num_probes_);
-    EncodeFixed32(data + total_bits/8 + 1, static_cast<uint32_t>(num_lines));
-
-    const char* const_data = data;
-    buf->reset(const_data);
-    hash_entries_.clear();
-
-    return Slice(data, total_bits / 8 + 5);
-  }
+  return Slice(data, total_bits / 8 + 5);
+}
 
 uint32_t FullFilterBitsBuilder::GetTotalBitsForLocality(uint32_t total_bits) {
   uint32_t num_lines =
@@ -118,7 +117,8 @@ int FullFilterBitsBuilder::CalculateNumEntry(const uint32_t space) {
 }
 
 inline void FullFilterBitsBuilder::AddHash(uint32_t h, char* data,
-    uint32_t num_lines, uint32_t total_bits) {
+                                           uint32_t num_lines,
+                                           uint32_t total_bits) {
 #ifdef NDEBUG
   static_cast<void>(total_bits);
 #endif
@@ -149,7 +149,7 @@ class FullFilterBitsReader : public FilterBitsReader {
     assert(data_);
     GetFilterMeta(contents, &num_probes_, &num_lines_);
     // Sanitize broken parameter
-    if (num_lines_ != 0 && (data_len_-5) % num_lines_ != 0) {
+    if (num_lines_ != 0 && (data_len_ - 5) % num_lines_ != 0) {
       num_lines_ = 0;
       num_probes_ = 0;
     } else if (num_lines_ != 0) {
@@ -175,7 +175,7 @@ class FullFilterBitsReader : public FilterBitsReader {
   ~FullFilterBitsReader() override {}
 
   bool MayMatch(const Slice& entry) override {
-    if (data_len_ <= 5) {   // remain same with original filter
+    if (data_len_ <= 5) {  // remain same with original filter
       return false;
     }
     // Other Error params, including a broken filter, regarded as match
@@ -225,7 +225,7 @@ class FullFilterBitsReader : public FilterBitsReader {
   // Get num_probes, and num_lines from filter
   // If filter format broken, set both to 0.
   void GetFilterMeta(const Slice& filter, size_t* num_probes,
-                             uint32_t* num_lines);
+                     uint32_t* num_lines);
 
   // "filter" contains the data appended by a preceding call to
   // FilterBitsBuilder::Finish. This method must return true if the key was
@@ -251,7 +251,8 @@ class FullFilterBitsReader : public FilterBitsReader {
 };
 
 void FullFilterBitsReader::GetFilterMeta(const Slice& filter,
-    size_t* num_probes, uint32_t* num_lines) {
+                                         size_t* num_probes,
+                                         uint32_t* num_lines) {
   uint32_t len = static_cast<uint32_t>(filter.size());
   if (len <= 5) {
     // filter is empty or broken
@@ -278,8 +279,8 @@ void FullFilterBitsReader::FilterPrepare(const uint32_t& hash,
   // Left shift by an extra 3 to convert bytes to bits
   uint32_t b = (h % num_lines) << (log2_cache_line_size_ + 3);
   PREFETCH(&filter.data()[b / 8], 0 /* rw */, 1 /* locality */);
-  PREFETCH(&filter.data()[b / 8 + (1 << log2_cache_line_size_) - 1],
-      0 /* rw */, 1 /* locality */);
+  PREFETCH(&filter.data()[b / 8 + (1 << log2_cache_line_size_) - 1], 0 /* rw */,
+           1 /* locality */);
   *bit_offset = b;
 }
 
@@ -312,11 +313,212 @@ bool FullFilterBitsReader::HashMayMatch(const uint32_t& hash,
   return true;
 }
 
+// wp
+class OtLexPdtBloomBitsReader : public FilterBitsReader {
+ public:
+  explicit OtLexPdtBloomBitsReader() {
+    //    fprintf(stderr, "DEBUG pqc7a26 init OtLexPdtBloomBitsReader\n");
+  }
+
+  explicit OtLexPdtBloomBitsReader(const char* buf) {
+    // construct a ot lex pdt
+    // restore essential members from buf
+    ot_pdt.pub_m_centroid_path_string.clear();
+    ot_pdt.pub_m_labels.clear();
+    ot_pdt.pub_m_centroid_path_branches.clear();
+    ot_pdt.pub_m_branching_chars.clear();
+    ot_pdt.pub_m_bp_m_bits.clear();
+    RecoverFromCharArray(ot_pdt.pub_m_centroid_path_string, ot_pdt.pub_m_labels,
+                         ot_pdt.pub_m_centroid_path_branches,
+                         ot_pdt.pub_m_branching_chars, ot_pdt.pub_m_bp_m_bits,
+                         ot_pdt.pub_m_bp_m_size, new_impl, sub_impl,
+                         fake_num_probes, buf);
+    //    fprintf(stdout, "DEBUG uq7zbt in otReader sizes for
+    //    string,label,branch,char,bit,size:%ld,%ld,%ld,%ld,%ld,%ld\n",
+    //            ot_pdt.pub_m_centroid_path_string.size(),
+    //            ot_pdt.pub_m_labels.size(),
+    //            ot_pdt.pub_m_centroid_path_branches.size(),
+    //            ot_pdt.pub_m_branching_chars.size(),
+    //            ot_pdt.pub_m_bp_m_bits.size(),
+    //            ot_pdt.pub_m_bp_m_size);
+
+    //    for (size_t i = 0; i < ot_pdt.pub_m_centroid_path_string.size(); i++)
+    //    {
+    //      fprintf(stdout, "Rstring:%ld,%d\n", i,
+    //      ot_pdt.pub_m_centroid_path_string[i]);
+    //    }
+    //    for (size_t i = 0; i < ot_pdt.pub_m_labels.size(); i++) {
+    //      fprintf(stdout, "Rlabel:%ld,%d\n", i, ot_pdt.pub_m_labels[i]);
+    //    }
+    //    for (size_t i = 0; i < ot_pdt.pub_m_centroid_path_branches.size();
+    //    i++) {
+    //      fprintf(stdout, "Rbranch:%ld,%d\n", i,
+    //      ot_pdt.pub_m_centroid_path_branches[i]);
+    //    }
+    //    for (size_t i = 0; i < ot_pdt.pub_m_branching_chars.size(); i++) {
+    //      fprintf(stdout, "Rchar:%ld,%d\n", i,
+    //      ot_pdt.pub_m_branching_chars[i]);
+    //    }
+    //    for (size_t i = 0; i < ot_pdt.pub_m_bp_m_bits.size(); i++) {
+    //      fprintf(stdout, "Rbit:%ld,%ld\n", i, ot_pdt.pub_m_bp_m_bits[i]);
+    //    }
+
+    //    fprintf(stderr, "DEBUG c2ys95 after RecoverFromCharArray
+    //    pub_m_bp_m_size:%lu pub_m_bp_m_bits.size():%lu\n",
+    //            ot_pdt.pub_m_bp_m_size, ot_pdt.pub_m_bp_m_bits.size());
+    // init pub_* members, and create a ot lex pdt instance from it
+    //        ot_pdt.init_pubs();
+    //    auto chrono_start = std::chrono::system_clock::now();
+    ot_pdt.instance();
+    //    auto chrono_end = std::chrono::system_clock::now();
+    //    std::chrono::microseconds elapsed_us =
+    //    std::chrono::duration_cast<std::chrono::microseconds>(chrono_end-chrono_start);
+    //    std::cout << "DEBUG cor73n ot_pdt.instance() takes " <<
+    //              elapsed_us.count() << " us." << std::endl;
+  }
+
+  // No Copy allowed
+  //  OtLexPdtBloomBitsReader(const&) = delete;
+  void operator=(const OtLexPdtBloomBitsReader&) = delete;
+
+  ~OtLexPdtBloomBitsReader() override {}
+
+  bool MayMatch(const Slice& key) override {
+    // idx = search_odt(key.data)
+    // if idx != -1, success
+    std::string key_string(key.data(), key.data() + key.size());
+    //    auto chrono_start = std::chrono::system_clock::now();
+    size_t idx = ot_pdt.index(key_string);
+    //    auto chrono_end = std::chrono::system_clock::now();
+    //    std::chrono::microseconds elapsed_us =
+    //    std::chrono::duration_cast<std::chrono::microseconds>(chrono_end-chrono_start);
+    //    std::cout << "DEBUG la045n ot_pdt.index ret:" << idx << ", takes(us) "
+    //    <<
+    //              elapsed_us.count() << std::endl;
+
+    //    fprintf(stdout, "DEBUG ab42kf in
+    //    OtLexPdtBloomBitsReader::MayMatch(%s): %ld\n",
+    //            key.ToString().c_str(), idx);
+
+    //     XXX for test
+    //    return true;
+
+    if (idx != (size_t)-1) {  // hit
+      //??? blk_offset = vector<>.find(idx)
+      //      fprintf(stdout, "DEBUG i0j5xn ot bitsReader MayMatch(%s): %ld,\n",
+      //              key.ToString().c_str(), idx);
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  virtual void MayMatch(int num_keys, Slice** keys, bool* may_match) override {
+    fprintf(stdout, "DEBUG w3xm82 in OtBitsReader::MayMatch(num_keys)\n");
+    for (int i = 0; i < num_keys; ++i) {
+      may_match[i] = MayMatch(*keys[i]);
+    }
+  }
+
+  // wp
+  void RecoverFromCharArray(std::vector<uint16_t>& v1,
+                            std::vector<uint16_t>& v2, std::vector<uint8_t>& v3,
+                            std::vector<uint8_t>& v4, std::vector<uint64_t>& v5,
+                            uint64_t& num, char& tmp_new_impl,
+                            char& tmp_sub_impl, char& tmp_fake_num_probes,
+                            const char*& buf) {
+    uint32_t size1 = 0, size2 = 0, size3 = 0, size4 = 0, size5 = 0;
+
+    uint32_t* p = (uint32_t*)buf;
+    size1 = *p;
+    uint16_t* p1 = (uint16_t*)(buf + 4);
+    v1.resize(size1);
+    for (uint64_t i = 0; i < size1; i++) {
+      v1[i] = *p1;
+      p1++;
+    }
+
+    p = (uint32_t*)(buf + 4 + size1 * 2);
+    size2 = *p;
+    p1 = (uint16_t*)(buf + 4 + size1 * 2 + 4);
+    v2.resize(size2);
+    for (uint64_t i = 0; i < size2; i++) {
+      v2[i] = *p1;
+      p1++;
+    }
+
+    p = (uint32_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2);
+    size3 = *p;
+    uint8_t* p2 = (uint8_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4);
+    v3.resize(size3);
+    for (uint64_t i = 0; i < size3; i++) {
+      v3[i] = *p2;
+      p2++;
+    }
+
+    p = (uint32_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3);
+    size4 = *p;
+    p2 = (uint8_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4);
+    v4.resize(size4);
+    for (uint64_t i = 0; i < size4; i++) {
+      v4[i] = *p2;
+      p2++;
+    }
+
+    p = (uint32_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4 +
+                    size4);
+    size5 = *p;
+    uint64_t* p4 = (uint64_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 +
+                               4 + size4 + 4);
+    v5.resize(size5);
+    for (uint64_t i = 0; i < size5; i++) {
+      v5[i] = *p4;
+      p4++;
+    }
+
+    uint64_t* p3 = (uint64_t*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 +
+                               4 + size4 + 4 + size5 * 8);
+    num = *p3;
+    //fprintf(stderr, "DEBUG m72qa4 RecoverFromCharArray num: %lu\n", num);
+
+    // xp, be compatible with full filter
+    char* pc1 = (char*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4 +
+                        size4 + 4 + size5 * 8 + 8);
+    tmp_new_impl = *pc1;
+    char* pc2 = (char*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4 +
+                        size4 + 4 + size5 * 8 + 8 + 1);
+    tmp_sub_impl = *pc2;
+    char* pc3 = (char*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4 +
+                        size4 + 4 + size5 * 8 + 8 + 1 + 1);
+    tmp_fake_num_probes = *pc3;
+    char* pc4 = (char*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4 +
+                        size4 + 4 + size5 * 8 + 8 + 1 + 1 + 1);
+    tmp_fake_num_probes = *pc4;
+    char* pc5 = (char*)(buf + 4 + size1 * 2 + 4 + size2 * 2 + 4 + size3 + 4 +
+                        size4 + 4 + size5 * 8 + 8 + 1 + 1 + 1 + 1);
+    tmp_fake_num_probes = *pc5;
+  }
+
+  // be compatible with full filter in GetBloomBitsReader
+  char new_impl;
+  char sub_impl;
+  char fake_num_probes;
+  // a ot lex pdt
+  rocksdb::succinct::tries::path_decomposed_trie<
+      rocksdb::succinct::tries::vbyte_string_pool, true>
+      ot_pdt;
+  // a vector<> stores blk boundary keys
+  // TODO
+};
+
 // An implementation of filter policy
 class BloomFilterPolicy : public FilterPolicy {
  public:
+  // wp
+  bool isPdt = false;
   explicit BloomFilterPolicy(int bits_per_key, bool use_block_based_builder)
-      : bits_per_key_(bits_per_key), hash_func_(BloomHash),
+      : bits_per_key_(bits_per_key),
+        hash_func_(BloomHash),
         use_block_based_builder_(use_block_based_builder) {
     initialize();
   }
@@ -347,7 +549,7 @@ class BloomFilterPolicy : public FilterPolicy {
       const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
       for (size_t j = 0; j < num_probes_; j++) {
         const uint32_t bitpos = h % bits;
-        array[bitpos/8] |= (1 << (bitpos % 8));
+        array[bitpos / 8] |= (1 << (bitpos % 8));
         h += delta;
       }
     }
@@ -362,7 +564,7 @@ class BloomFilterPolicy : public FilterPolicy {
 
     // Use the encoded k so that we can read filters generated by
     // bloom filters created using different parameters.
-    const size_t k = array[len-1];
+    const size_t k = array[len - 1];
     if (k > 30) {
       // Reserved for potentially new encodings for short bloom filters.
       // Consider it a match.
@@ -373,7 +575,7 @@ class BloomFilterPolicy : public FilterPolicy {
     const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
     for (size_t j = 0; j < k; j++) {
       const uint32_t bitpos = h % bits;
-      if ((array[bitpos/8] & (1 << (bitpos % 8))) == 0) return false;
+      if ((array[bitpos / 8] & (1 << (bitpos % 8))) == 0) return false;
       h += delta;
     }
     return true;
@@ -383,11 +585,17 @@ class BloomFilterPolicy : public FilterPolicy {
     if (use_block_based_builder_) {
       return nullptr;
     }
-
-    return new FullFilterBitsBuilder(bits_per_key_, num_probes_);
+    if (isPdt) {
+      return new OtLexPdtBloomBitsBuilder();
+    } else {
+      return new FullFilterBitsBuilder(bits_per_key_, num_probes_);
+    }
   }
 
   FilterBitsReader* GetFilterBitsReader(const Slice& contents) const override {
+    if (isPdt) {
+      return new OtLexPdtBloomBitsReader(contents.data());
+    }
     return new FullFilterBitsReader(contents);
   }
 
@@ -413,7 +621,9 @@ class BloomFilterPolicy : public FilterPolicy {
 
 const FilterPolicy* NewBloomFilterPolicy(int bits_per_key,
                                          bool use_block_based_builder) {
-  return new BloomFilterPolicy(bits_per_key, use_block_based_builder);
+  BloomFilterPolicy* p =
+      new BloomFilterPolicy(bits_per_key, use_block_based_builder);
+  //p->isPdt = true;
+  return p;
 }
-
 }  // namespace rocksdb

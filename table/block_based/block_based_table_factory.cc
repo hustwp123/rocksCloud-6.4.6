@@ -24,6 +24,7 @@
 #include "table/format.h"
 #include "util/mutexlock.h"
 #include "util/string_util.h"
+#include <cinttypes>
 
 namespace rocksdb {
 
